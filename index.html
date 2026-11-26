@@ -682,7 +682,15 @@
   const app = initializeApp(firebaseConfig);
   const db = getDatabase(app);
 
-  /* ───────── ДАННЫЕ ───────── */
+  // ───────── ПРЕФИКС ВСЕХ УЗЛОВ ─────────
+  const DB = {
+    peoples: 'tkawards_peoples',
+    usernames: 'tkawards_usernames',
+    verifyRequests: 'tkawards_verify_requests',
+    votes: 'tkawards_votes',
+    voteCounts: 'tkawards_vote_counts',
+  };
+
   const DATA = {
     nominations: [
       { id: 'tk_absolute', title: 'TK Absolute', sub: 'самые активные люди ИТД · мужской пол', participants: [
@@ -726,7 +734,6 @@
     ]
   };
 
-  /* ───────── УТИЛИТЫ ───────── */
   const $ = id => document.getElementById(id);
   const toastEl = $('toast');
   let toastTimer;
@@ -753,7 +760,6 @@
     return bytesToHex(arr);
   }
 
-  /* ───────── ХЕШИРОВАНИЕ ПАРОЛЯ (PBKDF2, 150 000 итераций, SHA-256) ───────── */
   async function hashPassword(password, saltHex){
     if (!window.isSecureContext){
       throw new Error('Хеширование пароля работает только на HTTPS или localhost');
@@ -770,7 +776,6 @@
     return bytesToHex(new Uint8Array(bits));
   }
 
-  /* ───────── СОСТОЯНИЕ ───────── */
   const SESSION_KEY = 'tk_awards_session_uid';
   const DEVICE_REGISTER_KEY = 'tk_awards_device_account';
 
@@ -784,48 +789,39 @@
   function loadSession(){ return localStorage.getItem(SESSION_KEY); }
   function clearSession(){ localStorage.removeItem(SESSION_KEY); }
 
-  /* ───────── ПРОВЕРКА УСТРОЙСТВА ───────── */
   async function checkDeviceAlreadyRegistered(){
     const storedUid = localStorage.getItem(DEVICE_REGISTER_KEY);
     if (!storedUid) return null;
-    // проверяем что аккаунт с этим uid ещё существует
-    const snap = await get(ref(db, `users/${storedUid}`));
+    const snap = await get(ref(db, `${DB.peoples}/${storedUid}`));
     if (snap.exists()){
       return { uid: storedUid, username: snap.val().username };
     }
-    // устаревший ключ — чистим
     localStorage.removeItem(DEVICE_REGISTER_KEY);
     return null;
   }
 
-  /* ───────── ПРОВЕРКА ITD-ЮЗЕРНЕЙМА ───────── */
   async function isItdUsernameTaken(itdUsername){
     const normalized = itdUsername.toLowerCase();
-
-    const [reqSnap, usersSnap] = await Promise.all([
-      get(ref(db, 'verificationRequests')),
-      get(ref(db, 'users'))
+    const [reqSnap, peopleSnap] = await Promise.all([
+      get(ref(db, DB.verifyRequests)),
+      get(ref(db, DB.peoples))
     ]);
-
     if (!reqSnap.exists()) return false;
     const requests = reqSnap.val();
-    const users = usersSnap.exists() ? usersSnap.val() : {};
-
+    const people = peopleSnap.exists() ? peopleSnap.val() : {};
     for (const uid in requests){
       const req = requests[uid];
       if (!req.itdUsername) continue;
       if (req.itdUsername.toLowerCase() !== normalized) continue;
-      const user = users[uid];
-      if (user && user.verify === true) return true;
+      const person = people[uid];
+      if (person && person.verify === true) return true;
     }
     return false;
   }
 
-  /* ───────── МОДАЛКИ ───────── */
   function openModal(id){ $(id).classList.add('open'); }
   function closeModal(id){ $(id).classList.remove('open'); }
 
-  /* ───────── РЕГИСТРАЦИЯ / ВХОД ───────── */
   let authMode = 'login';
 
   function setAuthMode(mode){
@@ -874,38 +870,33 @@
   };
 
   async function doRegister(username, password){
-    // 1. проверка устройства
     const existing = await checkDeviceAlreadyRegistered();
     if (existing){
       throw new Error(`на этом устройстве уже зарегистрирован аккаунт @${existing.username}. войди в него.`);
     }
 
-    // 2. проверка что юзернейм свободен
-    const usernameSnap = await get(ref(db, `usernames/${username}`));
+    const usernameSnap = await get(ref(db, `${DB.usernames}/${username}`));
     if (usernameSnap.exists()){
       throw new Error('этот юзернейм уже занят');
     }
 
-    // 3. создание
     const uid = crypto.randomUUID();
     const salt = randomHex(16);
     const passwordHash = await hashPassword(password, salt);
 
     const updates = {};
-    updates[`users/${uid}`] = {
+    updates[`${DB.peoples}/${uid}`] = {
       username,
       salt,
       passwordHash,
       verify: false,
       createdAt: Date.now()
     };
-    updates[`usernames/${username}`] = uid;
+    updates[`${DB.usernames}/${username}`] = uid;
 
     await update(ref(db), updates);
 
-    // 4. запомнить устройство
     localStorage.setItem(DEVICE_REGISTER_KEY, uid);
-
     saveSession(uid);
     await attachSession(uid);
     closeModal('authModal');
@@ -915,13 +906,13 @@
   }
 
   async function doLogin(username, password){
-    const usernameSnap = await get(ref(db, `usernames/${username}`));
+    const usernameSnap = await get(ref(db, `${DB.usernames}/${username}`));
     if (!usernameSnap.exists()) throw new Error('пользователь не найден');
     const uid = usernameSnap.val();
 
-    const userSnap = await get(ref(db, `users/${uid}`));
-    if (!userSnap.exists()) throw new Error('профиль не найден');
-    const profile = userSnap.val();
+    const personSnap = await get(ref(db, `${DB.peoples}/${uid}`));
+    if (!personSnap.exists()) throw new Error('профиль не найден');
+    const profile = personSnap.val();
 
     const computed = await hashPassword(password, profile.salt);
     if (computed !== profile.passwordHash) throw new Error('неверный пароль');
@@ -952,7 +943,7 @@
     $('authOpenBtn').textContent = 'Выйти';
 
     if (profileUnsub) profileUnsub();
-    profileUnsub = onValue(ref(db, `users/${uid}`), (snap) => {
+    profileUnsub = onValue(ref(db, `${DB.peoples}/${uid}`), (snap) => {
       currentProfile = snap.exists() ? snap.val() : null;
       $('authLabel').textContent = currentProfile?.username ? '@' + currentProfile.username : 'пользователь';
       updateVerifyBanner();
@@ -960,7 +951,7 @@
     });
 
     if (votesUnsub) votesUnsub();
-    votesUnsub = onValue(ref(db, 'votes'), (snap) => {
+    votesUnsub = onValue(ref(db, DB.votes), (snap) => {
       votes = {};
       if (snap.exists()){
         const all = snap.val();
@@ -972,7 +963,6 @@
     });
   }
 
-  /* ───────── ВЕРИФИКАЦИЯ ───────── */
   function updateVerifyBanner(){
     const banner = $('verifyBanner');
     if (currentUid && currentProfile && !currentProfile.verify) banner.style.display = 'block';
@@ -996,21 +986,18 @@
 
     $('verifySubmit').disabled = true;
     try {
-      // 1. нельзя две заявки
-      const existingReq = await get(ref(db, `verificationRequests/${currentUid}`));
+      const existingReq = await get(ref(db, `${DB.verifyRequests}/${currentUid}`));
       if (existingReq.exists()){
         if (currentProfile?.verify) throw new Error('твой аккаунт уже верифицирован');
         throw new Error('у тебя уже есть заявка на рассмотрении. дождись ответа администратора.');
       }
 
-      // 2. нельзя на уже верифицированный ITD-юзернейм
       const taken = await isItdUsernameTaken(raw);
       if (taken){
         throw new Error('этот юзернейм ИТД уже привязан к другому аккаунту.');
       }
 
-      // 3. отправляем заявку
-      await set(ref(db, `verificationRequests/${currentUid}`), {
+      await set(ref(db, `${DB.verifyRequests}/${currentUid}`), {
         username: currentProfile?.username || '',
         itdUsername: raw,
         requestedAt: Date.now(),
@@ -1027,14 +1014,13 @@
     }
   };
 
-  /* ───────── ГОЛОСОВАНИЕ ───────── */
   async function castVote(nomId, partId){
     if (!currentUid){ toast('сначала войди'); openModal('authModal'); return; }
     if (!currentProfile?.verify){ toast('аккаунт не верифицирован'); openModal('verifyModal'); return; }
     if (votes[nomId]){ toast('ты уже голосовал тут'); return; }
 
-    const voteRef = ref(db, `votes/${nomId}/${currentUid}`);
-    const counterRef = ref(db, `voteCounts/${nomId}/${partId}`);
+    const voteRef = ref(db, `${DB.votes}/${nomId}/${currentUid}`);
+    const counterRef = ref(db, `${DB.voteCounts}/${nomId}/${partId}`);
 
     try {
       const existing = await get(voteRef);
@@ -1050,7 +1036,6 @@
     }
   }
 
-  /* ───────── РЕНДЕР ───────── */
   const appEl = $('app');
 
   function render(){
@@ -1113,7 +1098,7 @@
     render();
     const saved = loadSession();
     if (saved){
-      const snap = await get(ref(db, `users/${saved}`));
+      const snap = await get(ref(db, `${DB.peoples}/${saved}`));
       if (snap.exists()) await attachSession(saved);
       else clearSession();
     }
